@@ -73,24 +73,24 @@ class NBAFantasyAPI:
         data = response.json()
         return pd.DataFrame.from_dict(data['body'])
 
-    def get_betting_odds(self, game_date: str = None, game_id: str = None, 
-                        item_format: str = "map") -> pd.DataFrame:
+    def get_betting_odds(self, game_date: str = None, game_id: str = None,
+                        item_format: str = "list") -> pd.DataFrame:
         """Get NBA betting odds for a specific date or game.
-        
+
         Args:
             game_date: Date in YYYYMMDD format (e.g., "20240107"). Optional if game_id is provided.
             game_id: Specific game ID to get odds for. Optional if game_date is provided.
-            item_format: Response format - can be "list" or "map". "map" gives games and lines 
-                        in map/dictionary format, "list" gives them in list format. Defaults to "map"
+            item_format: Response format - can be "list" or "map". "list" gives games and lines
+                        in list format, "map" gives them in map/dictionary format. Defaults to "list"
         """
         url = f"{self.base_url}/getNBABettingOdds"
         querystring = {"itemFormat": item_format}
-        
+
         if game_date:
             querystring["gameDate"] = game_date
         if game_id:
             querystring["gameID"] = game_id
-            
+
         if not game_date and not game_id:
             raise ValueError("Either game_date or game_id must be provided")
 
@@ -98,7 +98,54 @@ class NBAFantasyAPI:
         response.raise_for_status()
 
         data = response.json()
-        return pd.DataFrame.from_dict(data['body'])
+        body = data['body']
+
+        if not body:
+            # Return empty DataFrame with expected columns
+            return pd.DataFrame(columns=[
+                'gameID', 'gameDate', 'homeTeam', 'awayTeam', 'teamIDHome', 'teamIDAway',
+                'last_updated_e_time', 'sportsbook', 'totalOver', 'totalUnder', 'totalOverOdds',
+                'totalUnderOdds', 'homeTeamSpread', 'awayTeamSpread', 'homeTeamSpreadOdds',
+                'awayTeamSpreadOdds', 'homeTeamMLOdds', 'awayTeamMLOdds'
+            ])
+
+        # Flatten the nested structure: each game can have multiple sportsbooks
+        all_odds = []
+
+        for game in body:
+            game_base = {
+                'gameID': game.get('gameID'),
+                'gameDate': game.get('gameDate'),
+                'homeTeam': game.get('homeTeam'),
+                'awayTeam': game.get('awayTeam'),
+                'teamIDHome': game.get('teamIDHome'),
+                'teamIDAway': game.get('teamIDAway'),
+                'last_updated_e_time': game.get('last_updated_e_time')
+            }
+
+            # Process each sportsbook for this game
+            sportsbooks = game.get('sportsBooks', [])
+            for book in sportsbooks:
+                sportsbook_name = book.get('sportsBook')
+                odds = book.get('odds', {})
+
+                odds_record = game_base.copy()
+                odds_record.update({
+                    'sportsbook': sportsbook_name,
+                    'totalOver': odds.get('totalOver'),
+                    'totalUnder': odds.get('totalUnder'),
+                    'totalOverOdds': odds.get('totalOverOdds'),
+                    'totalUnderOdds': odds.get('totalUnderOdds'),
+                    'homeTeamSpread': odds.get('homeTeamSpread'),
+                    'awayTeamSpread': odds.get('awayTeamSpread'),
+                    'homeTeamSpreadOdds': odds.get('homeTeamSpreadOdds'),
+                    'awayTeamSpreadOdds': odds.get('awayTeamSpreadOdds'),
+                    'homeTeamMLOdds': odds.get('homeTeamMLOdds'),
+                    'awayTeamMLOdds': odds.get('awayTeamMLOdds')
+                })
+                all_odds.append(odds_record)
+
+        return pd.DataFrame(all_odds)
 
     def get_teams(self, schedules: bool = False, rosters: bool = False, 
                   stats_to_get: str = "averages", top_performers: bool = True, 
@@ -361,7 +408,7 @@ class NBAFantasyAPI:
 
     def get_dfs_salaries(self, date: str) -> pd.DataFrame:
         """Get NBA DFS (Daily Fantasy Sports) salaries for a specific date.
-        
+
         Args:
             date: Date in YYYYMMDD format (e.g., "20250120") - required
         """
@@ -372,7 +419,43 @@ class NBAFantasyAPI:
         response.raise_for_status()
 
         data = response.json()
-        return pd.DataFrame.from_dict(data['body'])
+        body = data['body']
+
+        # The API returns separate arrays for different platforms
+        all_salaries = []
+
+        # Process DraftKings data
+        if 'draftkings' in body and body['draftkings']:
+            dk_data = body['draftkings']
+            for player in dk_data:
+                player_data = player.copy()
+                player_data['platform'] = 'DraftKings'
+                player_data['dfs_salary'] = player.get('salary')
+                all_salaries.append(player_data)
+
+        # Process FanDuel data
+        if 'fanduel' in body and body['fanduel']:
+            fd_data = body['fanduel']
+            for player in fd_data:
+                player_data = player.copy()
+                player_data['platform'] = 'FanDuel'
+                player_data['dfs_salary'] = player.get('salary')
+                all_salaries.append(player_data)
+
+        # Process SuperDraft data
+        if 'superdraft' in body and body['superdraft']:
+            sd_data = body['superdraft']
+            for player in sd_data:
+                player_data = player.copy()
+                player_data['platform'] = 'SuperDraft'
+                player_data['dfs_salary'] = player.get('salary')
+                all_salaries.append(player_data)
+
+        if not all_salaries:
+            # Return empty DataFrame with expected columns
+            return pd.DataFrame(columns=['playerID', 'longName', 'pos', 'team', 'teamID', 'salary', 'platform', 'dfs_salary'])
+
+        return pd.DataFrame(all_salaries)
 
     def get_adp(self, adp_date: str = None, combine_guards: bool = False, 
                combine_forwards: bool = False, combine_fc: bool = False) -> pd.DataFrame:

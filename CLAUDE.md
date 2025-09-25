@@ -97,6 +97,7 @@ Stretch:     P(lineup_score ≥ 6x) ≥ 0.15
 
 ## Technical Implementation
 
+
 ### Core Technology Stack
 1. **XGBoost** with Bayesian hyperparameter optimization
 2. **Ensemble meta-learning** for model combination

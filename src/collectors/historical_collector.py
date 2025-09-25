@@ -65,6 +65,7 @@ class HistoricalDataCollector:
             self.data_dir / "player_logs",
             self.data_dir / "injuries",
             self.data_dir / "dfs_salaries",
+            self.data_dir / "betting_odds",
             self.data_dir / "teams",
             self.data_dir / "players"
         ]
@@ -79,15 +80,24 @@ class HistoricalDataCollector:
             self.logger.warning(f"No data to save for {data_type}")
             return ""
 
-        # Create filename
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Create simple filename: [folder_name]_[date].parquet
         if date_str:
-            filename = f"{data_type}_{date_str}_{timestamp}"
+            filename = f"{data_type}_{date_str}"
         else:
-            filename = f"{data_type}_{timestamp}"
+            filename = f"{data_type}"
 
-        if additional_info:
-            filename += f"_{additional_info}"
+        # Special case for player_logs: player_logs_[date]_[TeamA@TeamB].parquet
+        if data_type == "player_logs" and additional_info:
+            # Extract game info from additional_info (e.g., "game_20211019_BKN@MIL")
+            if additional_info.startswith("game_"):
+                game_info = additional_info.replace("game_", "").replace(date_str + "_", "")
+                filename = f"{data_type}_{date_str}_{game_info}"
+            else:
+                filename = f"{data_type}_{date_str}_{additional_info}"
+        elif additional_info and data_type != "player_logs":
+            # For non-player_logs, only add additional_info for special cases
+            if additional_info in ["current"]:
+                filename = f"{data_type}_{additional_info}"
 
         # Select file extension and save method
         if self.config.file_format == "parquet":
@@ -479,31 +489,78 @@ class HistoricalDataCollector:
 
         for _, row in dfs_df.iterrows():
             try:
-                # Save for both DraftKings and FanDuel if available
-                if 'dkSalary' in row and pd.notna(row.get('dkSalary')):
-                    dk_salary = DFSSalary(
+                # New format: each row has platform and salary columns
+                if pd.notna(row.get('salary')) and pd.notna(row.get('platform')):
+                    dfs_salary = DFSSalary(
                         player_id=int(row.get('playerID', 0)),
                         game_date=game_date,
-                        platform='DraftKings',
-                        salary=int(row.get('dkSalary', 0)),
+                        platform=row.get('platform'),
+                        salary=int(row.get('salary', 0)),
                         position=row.get('pos', ''),
                         is_available=True
                     )
-                    session.merge(dk_salary)
-
-                if 'fdSalary' in row and pd.notna(row.get('fdSalary')):
-                    fd_salary = DFSSalary(
-                        player_id=int(row.get('playerID', 0)),
-                        game_date=game_date,
-                        platform='FanDuel',
-                        salary=int(row.get('fdSalary', 0)),
-                        position=row.get('pos', ''),
-                        is_available=True
-                    )
-                    session.merge(fd_salary)
+                    session.merge(dfs_salary)
 
             except Exception as e:
                 self.logger.error(f"Error saving DFS salary data: {e}")
+                continue
+
+    def collect_betting_odds_for_date_range(self):
+        """Collect betting odds data for the specified date range."""
+        self.logger.info(f"Starting betting odds collection from {self.config.start_date} to {self.config.end_date}")
+
+        dates = list(self._date_range_generator(self.config.start_date, self.config.end_date))
+
+        with get_db_session() as session:
+            for date_str in tqdm(dates, desc="Collecting betting odds"):
+                # Check if data already exists by joining with Game table
+                target_date = datetime.strptime(date_str, '%Y%m%d').date()
+                existing_odds = session.query(BettingOdds).join(Game).filter(
+                    Game.game_date >= target_date,
+                    Game.game_date < target_date + timedelta(days=1)
+                ).count()
+
+                if existing_odds > 0:
+                    continue
+
+                betting_df = self._make_request_with_retry(
+                    self.api.get_betting_odds,
+                    game_date=date_str
+                )
+
+                if betting_df is not None and not betting_df.empty:
+                    # Save to file first
+                    file_path = self._save_to_file(betting_df, "betting_odds", date_str)
+
+                    # Save to database if configured
+                    if self.config.save_to_database:
+                        self._save_betting_odds_data(session, betting_df, date_str)
+
+    def _save_betting_odds_data(self, session, betting_df: pd.DataFrame, date_str: str):
+        """Save betting odds data to database."""
+        current_timestamp = datetime.utcnow()
+
+        for _, row in betting_df.iterrows():
+            try:
+                # Each row represents odds from one sportsbook for one game
+                betting_odds = BettingOdds(
+                    game_id=row.get('gameID'),
+                    sportsbook=row.get('sportsbook'),
+                    timestamp=current_timestamp,
+                    home_spread=self._safe_float(row.get('homeTeamSpread')),
+                    away_spread=self._safe_float(row.get('awayTeamSpread')),
+                    home_spread_odds=self._safe_int(row.get('homeTeamSpreadOdds')),
+                    away_spread_odds=self._safe_int(row.get('awayTeamSpreadOdds')),
+                    home_moneyline=self._safe_int(row.get('homeTeamMLOdds')),
+                    away_moneyline=self._safe_int(row.get('awayTeamMLOdds')),
+                    total_points=self._safe_float(row.get('totalOver')),
+                    over_odds=self._safe_int(row.get('overOdds')),
+                    under_odds=self._safe_int(row.get('underOdds'))
+                )
+                session.merge(betting_odds)
+
+            except Exception as e:
+                self.logger.error(f"Error saving betting odds data: {e}")
                 continue
 
     @staticmethod
